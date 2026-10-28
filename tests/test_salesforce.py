@@ -1418,12 +1418,19 @@ def test_apex_calls_pass(tmp_path: Path) -> None:
 
     result = extract_sf(tmp_path)
     calls = {(e["source"], e["target"]) for e in result["edges"]
-             if e["relation"] == "calls"}
+             if e["relation"] == "calls" and not e.get("sf_method_level")}
     assert calls == {
         (apex_nid("AccountTrigger"), apex_nid("AccountTriggerHandler")),
         (apex_nid("AccountTriggerHandler"), apex_nid("AccountService")),
         (apex_nid("AccountTriggerHandler"), apex_nid("Dispatcher")),
         (apex_nid("AccountTriggerHandler"), apex_nid("AccountRules")),
+    }
+    # Method level: from the enclosing method to each parsed callee method.
+    method_calls = {(e["source"], e["target"]) for e in result["edges"]
+                    if e.get("sf_method_level")}
+    assert method_calls == {
+        (apex_method_nid("AccountTriggerHandler", "run"), apex_method_nid("AccountService", "touch")),
+        (apex_method_nid("AccountTriggerHandler", "run"), apex_method_nid("Dispatcher", "register")),
     }
     call = next(e for e in result["edges"] if e["relation"] == "calls"
                 and e["source"] == apex_nid("AccountTrigger"))
@@ -1439,6 +1446,44 @@ def test_apex_calls_pass(tmp_path: Path) -> None:
     assert recursive[0]["sf_cycle"] == sorted([
         apex_nid("AccountService"), apex_nid("AccountTrigger"),
         apex_nid("AccountTriggerHandler")])
+
+
+def test_apex_real_org_shapes(tmp_path: Path) -> None:
+    """Multi-line signatures keep ``member_of``; platform interfaces become stub
+    nodes; a query split across concatenated literals still names its object;
+    tooling folders (``.sfdx``) are not parsed."""
+    classes = tmp_path / "force-app" / "classes"
+    classes.mkdir(parents=True)
+    (classes / "NightlyBatch.cls").write_text(
+        "public with sharing class NightlyBatch implements Database.Batchable<SObject>,\n"
+        "        Database.Stateful, Schedulable {\n"
+        "    @AuraEnabled(cacheable=false)\n"
+        "    public static Map<Id, List<Database.SaveResult>> listRows(\n"
+        "        String a,\n"
+        "        Integer b\n"
+        "    ) {\n"
+        "        String q = 'SELECT Id, Status ' +\n"
+        "            'FROM ServiceAppointment WHERE ' + a;\n"
+        "        return null;\n"
+        "    }\n"
+        "}\n", encoding="utf-8")
+    sfdx = tmp_path / ".sfdx" / "tools" / "StandardApexLibrary" / "System"
+    sfdx.mkdir(parents=True)
+    (sfdx / "Http.cls").write_text("global class Http { global Http() {} }\n", encoding="utf-8")
+
+    result = extract_sf(tmp_path)
+    ids = {n["id"] for n in result["nodes"]}
+    assert apex_nid("Http") not in ids
+    member = {(e["source"], e["target"]) for e in result["edges"] if e["relation"] == "member_of"}
+    assert (apex_method_nid("NightlyBatch", "listRows"), apex_nid("NightlyBatch")) in member
+    implements = {e["target"] for e in result["edges"] if e["relation"] == "implements"}
+    assert implements == {apex_nid("Database.Batchable"), apex_nid("Database.Stateful"),
+                          apex_nid("Schedulable")}
+    stub = next(n for n in result["nodes"] if n["id"] == apex_nid("Database.Batchable"))
+    assert stub["sf_stub"] and stub["sf_platform"]
+    queries = [e for e in result["edges"] if e["relation"] == "queries"]
+    assert [(e["target"], e.get("sf_dynamic")) for e in queries] == [
+        (sobject_nid("ServiceAppointment"), True)]
 
 
 def _flow_xml(trigger_type: str, status: str) -> str:

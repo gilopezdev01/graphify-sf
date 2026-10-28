@@ -16,6 +16,7 @@ the whole analysis.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .constants import sobject_nid, sobject_stub
@@ -381,6 +382,23 @@ def _merge_lwc_components(all_nodes, all_edges):
         edge["source"] = renamed.get(edge["source"], edge["source"])
 
 
+#: Tooling / output directories that are never Salesforce metadata. ``.sfdx/tools``
+#: alone holds thousands of StandardApexLibrary stubs that would flood the graph.
+_SKIP_DIRS = frozenset({
+    ".sfdx", ".sf", ".git", ".github", ".vscode", ".idea", ".claude", ".husky",
+    "node_modules", "graphify-out", ".localdevserver", "__pycache__",
+})
+
+
+def _repo_files(root: Path) -> list[Path]:
+    """Every file under *root*, pruning ``_SKIP_DIRS`` before descending into them."""
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        files.extend(Path(dirpath) / f for f in filenames)
+    return sorted(files)
+
+
 def extract_sf(path, *, cpq_data_dir=None, include_permissions=False, **kwargs):
     """Extract a Salesforce repository into a knowledge graph.
 
@@ -455,7 +473,7 @@ def extract_sf(path, *, cpq_data_dir=None, include_permissions=False, **kwargs):
     if root.is_file():
         files = [root]
     else:
-        files = sorted(p for p in root.rglob("*") if p.is_file())
+        files = _repo_files(root)
 
     all_nodes: list[dict] = []
     all_edges: list[dict] = []

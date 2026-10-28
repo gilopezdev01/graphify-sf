@@ -67,11 +67,21 @@ _TRIGGER_DECL_RE = re.compile(
 
 #: Method signature. A visibility modifier is REQUIRED to avoid matching control
 #: flow (``else if (...)``, ``for (...)``) as methods. Captures return type,
-#: name and the raw parameter list.
+#: name and the raw parameter list. Modifiers come in any order, return types may
+#: be dotted / nested generics / arrays (``Map<Id, List<Database.SaveResult>>``),
+#: and the parameter list may span several lines.
 _METHOD_RE = re.compile(
     r"\b(public|private|protected|global)\s+"
-    r"(?:static\s+)?(?:override\s+)?(?:virtual\s+)?"
-    r"(\w+(?:<[^>]+>)?)\s+(\w+)\s*\((.*?)\)"
+    r"(?:(?:static|override|virtual|abstract|final|testmethod|webservice)\s+)*"
+    r"([\w.]+(?:\s*<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?(?:\s*\[\s*\])?)\s+(\w+)\s*\(([^)]*)\)",
+    re.IGNORECASE,
+)
+
+#: ``FROM <Object>`` closing a query that was split across concatenated literals
+#: (``'SELECT Id, Name ' + 'FROM Account WHERE ' + clause``). Upper-case ``FROM``
+#: and a capitalized object keep ordinary prose in literals from matching.
+_SPLIT_FROM_RE = re.compile(
+    r"(?:^|\s)FROM\s+([A-Z]\w*)(?=\s*$|\s+(?i:WHERE|ORDER|GROUP|LIMIT|WITH|USING)\b)"
 )
 
 #: Inline SOQL ``[SELECT ... ]`` on comment/string-stripped code. The bracket
@@ -85,12 +95,15 @@ _STRING_SOQL_RE = re.compile(r"\bSELECT\b.*\bFROM\s+\w+", re.IGNORECASE | re.DOT
 #: Semi-join ``Id [NOT] IN (SELECT AccountId FROM Contact ...)`` — a query on a
 #: second object, not a child relationship.
 _SEMI_JOIN_RE = re.compile(
-    r"\bIN\s*\(\s*(SELECT\b[^()]*?\bFROM\s+\w+[^()]*)\)", re.IGNORECASE | re.DOTALL
+    r"\bIN\s*\(\s*(SELECT\b(?:[^()]|\([^()]*\))*?\bFROM\s+\w+(?:[^()]|\([^()]*\))*)\)",
+    re.IGNORECASE | re.DOTALL,
 )
 
-#: Child-relationship subquery ``(SELECT ... FROM Contacts ...)``.
+#: Child-relationship subquery ``(SELECT ... FROM Contacts ...)``. One level of
+#: nested parentheses is allowed (``WHERE Status NOT IN ('A', 'B')``).
 _SUBQUERY_RE = re.compile(
-    r"\(\s*SELECT\b([^()]*?)\bFROM\s+(\w+)[^()]*\)", re.IGNORECASE | re.DOTALL
+    r"\(\s*SELECT\b((?:[^()]|\([^()]*\))*?)\bFROM\s+(\w+)(?:[^()]|\([^()]*\))*\)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 #: Main ``SELECT <fields> FROM <object> <rest>`` once subqueries are removed.
@@ -399,6 +412,14 @@ def _detect_soql(code: str, strings: list[tuple[int, str]]) -> list[dict]:
     sites: list[dict] = []
     candidates = [(m.start(1), m.group(1), False) for m in _INLINE_SOQL_RE.finditer(code)]
     candidates += [(pos, lit, True) for pos, lit in strings if _STRING_SOQL_RE.search(lit)]
+    # Dynamic SOQL split across concatenated literals: when the file builds a
+    # SELECT in some literal, a literal carrying only the ``FROM <Object>`` part
+    # names the queried object.
+    if any(re.search(r"\bSELECT\b", lit, re.IGNORECASE) for _pos, lit in strings):
+        for pos, lit in strings:
+            split_from = _SPLIT_FROM_RE.search(lit)
+            if split_from and not _STRING_SOQL_RE.search(lit):
+                candidates.append((pos, "SELECT Id " + lit[split_from.start():], True))
     for offset, text, dynamic in sorted(candidates):
         soql = parse_soql(text)
         if soql is None:
